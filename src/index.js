@@ -45,9 +45,13 @@ async function main() {
   }
 
   const provider = new ethers.JsonRpcProvider(config.rpcUrl);
-  const signer = config.privateKey
+  const baseSigner = config.privateKey
     ? new ethers.Wallet(config.privateKey, provider)
     : null;
+  const signer = baseSigner ? new ethers.NonceManager(baseSigner) : null;
+  if (signer && baseSigner) {
+    signer.address = baseSigner.address;
+  }
   const contract = buildContract({ strategy, config, provider, signer });
 
   const runner = new KeeperRunner({

@@ -37,6 +37,8 @@ function getPairKey(tokenA, tokenB) {
 export function createWindmillStrategy() {
   /** @type {number | null} */
   let lastScannedBlock = null;
+  /** @type {Set<string>} */
+  const pendingOrderIds = new Set();
 
   return {
     name: "windmill",
@@ -119,6 +121,11 @@ export function createWindmillStrategy() {
           // Fetch full order data and check expiration
           const eligibleOrders = [];
           for (const id of orderIds) {
+            const idStr = id.toString();
+            if (pendingOrderIds.has(idStr)) {
+              logger.debug(`Order ${idStr} is pending settlement, skipping`);
+              continue;
+            }
             try {
               const order = await contract.getOrder(id);
               if (!order.active) {
@@ -210,8 +217,26 @@ export function createWindmillStrategy() {
      */
     async executeWorkItem({ item, contract, logger }) {
       const deadline = Math.floor(Date.now() / 1000) + 60;
-      logger.info(`Executing match: buyId=${item.buy.id.toString()}, sellId=${item.sell.id.toString()}`);
-      return await contract.matchOrders(item.buy.id, item.sell.id, deadline);
+      const buyIdStr = item.buy.id.toString();
+      const sellIdStr = item.sell.id.toString();
+      logger.info(`Executing match: buyId=${buyIdStr}, sellId=${sellIdStr}`);
+      const tx = await contract.matchOrders(item.buy.id, item.sell.id, deadline);
+
+      pendingOrderIds.add(buyIdStr);
+      pendingOrderIds.add(sellIdStr);
+
+      if (tx && typeof tx.wait === "function") {
+        tx.wait()
+          .catch((err) => {
+            logger.debug?.(`Match tx for buyId=${buyIdStr}, sellId=${sellIdStr} settled with error: ${err?.message || err}`);
+          })
+          .finally(() => {
+            pendingOrderIds.delete(buyIdStr);
+            pendingOrderIds.delete(sellIdStr);
+          });
+      }
+
+      return tx;
     },
 
     /**

@@ -132,5 +132,61 @@ test("Windmill Strategy - executeWorkItem returns transaction without redundant 
   assert.equal(matchOrdersParams.buyId, 101n);
   assert.equal(matchOrdersParams.sellId, 202n);
   assert.equal(typeof matchOrdersParams.deadline, "number");
-  assert.equal(waitCalled, false, "executeWorkItem should return tx directly without awaiting tx.wait()");
+});
+
+test("Windmill Strategy - tracks pending settlements and skips them in getWorkItems", async () => {
+  const strategy = createWindmillStrategy();
+  const logger = createMockLogger();
+  let resolveWait;
+  const waitPromise = new Promise((resolve) => {
+    resolveWait = resolve;
+  });
+
+  const mockTx = {
+    hash: "0xpending123",
+    wait() {
+      return waitPromise;
+    }
+  };
+
+  const getOrderCalls = [];
+  const contract = {
+    async paused() { return false; },
+    filters: {
+      OrderCreated() { return "filter"; }
+    },
+    async queryFilter() { return []; },
+    async getOrdersByPair() { return [101n, 102n]; },
+    async getOrder(id) {
+      getOrderCalls.push(id);
+      return { id, active: true, expiry: 0n };
+    },
+    async matchOrders() {
+      return mockTx;
+    }
+  };
+  const provider = {
+    async getBlockNumber() { return 100; }
+  };
+
+  // Submit match for order 101
+  await strategy.executeWorkItem({
+    item: { buy: { id: 101n }, sell: { id: 202n } },
+    contract,
+    logger
+  });
+
+  // Next cycle: 101n is still pending settlement, so getOrder should NOT be called for 101n
+  await strategy.getWorkItems({ now: 1000, provider, contract, logger });
+  assert.equal(getOrderCalls.includes(101n), false, "Pending order 101n should be skipped in getWorkItems");
+  assert.equal(getOrderCalls.includes(102n), true, "Non-pending order 102n should be processed");
+
+  // When transaction finishes mining:
+  resolveWait({ status: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 10)); // flush microtasks
+
+  // Order 101n should no longer be pending
+  getOrderCalls.length = 0;
+  await strategy.getWorkItems({ now: 1000, provider, contract, logger });
+  assert.equal(getOrderCalls.includes(101n), true, "Order 101n should be fetched again after terminal settlement state");
 });
