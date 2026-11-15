@@ -99,3 +99,38 @@ test("Windmill Strategy - Rolling event scan window tracking", async (t) => {
   await strategy.getWorkItems({ now: 1000, provider, contract, logger });
   assert.equal(queryFilterCalls.length, 2); // No new call to queryFilter
 });
+
+test("Windmill Strategy - executeWorkItem returns transaction without redundant tx.wait()", async () => {
+  const strategy = createWindmillStrategy();
+  const logger = createMockLogger();
+  let waitCalled = false;
+  let matchOrdersParams = null;
+
+  const mockTx = {
+    hash: "0xabcdef1234567890",
+    async wait() {
+      waitCalled = true;
+      return { status: 1 };
+    }
+  };
+
+  const contract = {
+    async matchOrders(buyId, sellId, deadline) {
+      matchOrdersParams = { buyId, sellId, deadline };
+      return mockTx;
+    }
+  };
+
+  const item = {
+    buy: { id: 101n },
+    sell: { id: 202n }
+  };
+
+  const result = await strategy.executeWorkItem({ item, contract, logger });
+
+  assert.equal(result, mockTx);
+  assert.equal(matchOrdersParams.buyId, 101n);
+  assert.equal(matchOrdersParams.sellId, 202n);
+  assert.equal(typeof matchOrdersParams.deadline, "number");
+  assert.equal(waitCalled, false, "executeWorkItem should return tx directly without awaiting tx.wait()");
+});

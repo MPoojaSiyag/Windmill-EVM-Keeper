@@ -60,14 +60,16 @@ export function createWindmillStrategy() {
       }
 
       // Discover pairs from events safely
-      try {
-        let deployBlock = 0;
-        if (process.env.DEPLOY_BLOCK !== undefined && process.env.DEPLOY_BLOCK !== "") {
-          const deployBlockStr = process.env.DEPLOY_BLOCK.trim();
-          if (/^\d+$/.test(deployBlockStr)) {
-            deployBlock = parseInt(deployBlockStr, 10);
-          }
+      let deployBlock = 0;
+      if (process.env.DEPLOY_BLOCK !== undefined && process.env.DEPLOY_BLOCK !== "") {
+        const deployBlockStr = process.env.DEPLOY_BLOCK.trim();
+        if (!/^\d+$/.test(deployBlockStr)) {
+          throw new Error(`Invalid DEPLOY_BLOCK: "${process.env.DEPLOY_BLOCK}". Must be a valid non-negative block number.`);
         }
+        deployBlock = parseInt(deployBlockStr, 10);
+      }
+
+      try {
 
         const currentBlock = await provider.getBlockNumber();
         const startBlock = lastScannedBlock !== null ? lastScannedBlock + 1 : deployBlock;
@@ -209,41 +211,7 @@ export function createWindmillStrategy() {
     async executeWorkItem({ item, contract, logger }) {
       const deadline = Math.floor(Date.now() / 1000) + 60;
       logger.info(`Executing match: buyId=${item.buy.id.toString()}, sellId=${item.sell.id.toString()}`);
-      const tx = await contract.matchOrders(item.buy.id, item.sell.id, deadline);
-      const receipt = await tx.wait();
-      
-      const banner = `
-/********************************================================================****************\\
-// ******************************************************************************************** //
-// *                                                                                          * //
-// *   🎉 🎉 🎉  ON-CHAIN TRADE MATCH & SETTLEMENT SUCCESSFUL!  🎉 🎉 🎉                       * //
-// *                                                                                          * //
-// ******************************************************************************************** //
-// *                                                                                          * //
-// *  📜 TRANSACTION DETAILS:                                                                  * //
-// *  --------------------------------------------------------------------------------------  * //
-// *  • Transaction Hash : ${receipt.hash || tx.hash}
-// *  • Settlement Status: ${receipt.status} (SUCCESS / CONFIRMED ON-CHAIN)                      * //
-// *  • Network & Chain   : Local Anvil EVM (Chain ID: 31337)                                  * //
-// *  • Exchange Contract: ${contract.target || contract.address}                            * //
-// *                                                                                          * //
-// *  --------------------------------------------------------------------------------------  * //
-// *  🛍️ BUY ORDER (#${item.buy.id.toString()}):                                                                      * //
-// *  • Trader Account   : ${item.buy.maker} (Trader 1 - Buyer)        * //
-// *  • Offered Asset    : ${ethers.formatEther(item.buy.remainingIn)} WETH                                                             * //
-// *  • Execution Price  : $${(Number(item.buy.price) / 1e27).toFixed(2)} / WETH                                                       * //
-// *                                                                                          * //
-// *  --------------------------------------------------------------------------------------  * //
-// *  🏷️ SELL ORDER (#${item.sell.id.toString()}):                                                                     * //
-// *  • Trader Account   : ${item.sell.maker} (Trader 2 - Seller)       * //
-// *  • Offered Asset    : ${ethers.formatUnits(item.sell.remainingIn, 6)} USDC                                                          * //
-// *  • Execution Price  : $${(Number(item.sell.price) / 1e27).toFixed(2)} / WETH                                                       * //
-// *  • Order State      : FILLED & SETTLED (Deactivated on-chain)                            * //
-// *                                                                                          * //
-// ******************************************************************************************** //
-\\********************************================================================****************/`;
-      console.log(banner);
-      return tx;
+      return await contract.matchOrders(item.buy.id, item.sell.id, deadline);
     },
 
     /**
