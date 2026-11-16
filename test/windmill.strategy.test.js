@@ -352,8 +352,9 @@ test("Windmill Strategy - passes pollIntervalMs as timeout to tx.wait and handle
     maxAttempts: 2
   });
 
-  // Wait until maxAttempts (2 calls to wait) finish
-  while (waitCount < 2) {
+  // Wait until maxAttempts (2 calls to wait) finish or deadline expires
+  const deadline = Date.now() + 1000;
+  while (waitCount < 2 && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 15));
   }
   // Allow remaining tick for cleanup
