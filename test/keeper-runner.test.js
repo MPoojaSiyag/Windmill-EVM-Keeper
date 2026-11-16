@@ -204,3 +204,53 @@ test("RecoverableNonceManager reconciles nonce when broadcast fails", async () =
   const recoveredNonce = await managedSigner.getNonce("pending");
   assert.equal(recoveredNonce, 10, "Nonce should reconcile with node pending count on broadcast rejection");
 });
+
+test("RecoverableNonceManager prevents unhandled rejection when both nonce lookup and population reject", async () => {
+  let unhandledCaptured = null;
+  const onUnhandled = (reason) => {
+    unhandledCaptured = reason;
+  };
+  process.on("unhandledRejection", onUnhandled);
+
+  try {
+    const mockProvider = {
+      async getTransactionCount() {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        throw new Error("RPC error: nonce query failed");
+      }
+    };
+
+    const mockBaseSigner = {
+      address: "0x1234567890123456789012345678901234567890",
+      provider: mockProvider,
+      async getAddress() { return this.address; },
+      async getNonce() {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        throw new Error("RPC error: nonce query failed");
+      },
+      async populateTransaction() {
+        // Population fails slightly faster than nonce lookup
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        throw new Error("RPC error: populateTransaction failed");
+      },
+      async sendTransaction() { return {}; }
+    };
+
+    const managedSigner = new RecoverableNonceManager(mockBaseSigner);
+    await assert.rejects(
+      () => managedSigner.sendTransaction({ to: "0xabc" }),
+      /RPC error/
+    );
+
+    // Wait for the slower nonce query rejection to settle
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    assert.equal(
+      unhandledCaptured,
+      null,
+      "No unhandled promise rejection should occur when both nonce query and population reject"
+    );
+  } finally {
+    process.removeListener("unhandledRejection", onUnhandled);
+  }
+});

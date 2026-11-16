@@ -21,14 +21,17 @@ export class RecoverableNonceManager extends ethers.NonceManager {
    */
   async sendTransaction(tx) {
     const noncePromise = this.getNonce("pending");
-    this.increment();
+    // Attach no-op handler immediately to prevent unhandled rejection if population fails first
+    noncePromise.catch(() => {});
 
     let populatedTx;
     try {
+      const nonce = await noncePromise;
+      this.increment();
       populatedTx = await this.signer.populateTransaction(tx);
-      populatedTx.nonce = await noncePromise;
+      populatedTx.nonce = nonce;
     } catch (err) {
-      // Known pre-broadcast failure (e.g. estimateGas / simulation revert):
+      // Known pre-broadcast failure (e.g. estimateGas / simulation revert or nonce lookup failure):
       // The transaction was never broadcast to the network. Reset to avoid nonce gaps.
       this.reset();
       throw err;
