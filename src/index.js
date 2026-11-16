@@ -3,6 +3,7 @@ import { ethers } from "ethers";
 import { loadConfig } from "./config.js";
 import { KeeperRunner } from "./keeper-runner.js";
 import { createLogger } from "./logger.js";
+import { RecoverableNonceManager } from "./nonce-manager.js";
 import { createStrategy } from "./strategies/index.js";
 import { startTelemetryServer, stopTelemetryServer } from "./telemetry-server.js";
 
@@ -48,10 +49,7 @@ async function main() {
   const baseSigner = config.privateKey
     ? new ethers.Wallet(config.privateKey, provider)
     : null;
-  const signer = baseSigner ? new ethers.NonceManager(baseSigner) : null;
-  if (signer && baseSigner) {
-    signer.address = baseSigner.address;
-  }
+  const signer = baseSigner ? new RecoverableNonceManager(baseSigner) : null;
   const contract = buildContract({ strategy, config, provider, signer });
 
   const runner = new KeeperRunner({
