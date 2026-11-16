@@ -306,13 +306,21 @@ test("Windmill Strategy - stops background settlement monitor cleanly when strat
 
 test("Windmill Strategy - passes pollIntervalMs as timeout to tx.wait and handles timeout error cleanly", async () => {
   const strategy = createWindmillStrategy();
-  const logger = createMockLogger();
+  const debugLogs = [];
+  const logger = {
+    ...createMockLogger(),
+    debug(msg) {
+      debugLogs.push(msg);
+    }
+  };
+  let waitCount = 0;
   let waitConfirms = null;
   let waitTimeout = null;
 
   const mockTx = {
     hash: "0xtimeout123",
     async wait(confirms, timeout) {
+      waitCount += 1;
       waitConfirms = confirms;
       waitTimeout = timeout;
       const err = new Error("wait for transaction timeout");
@@ -344,6 +352,24 @@ test("Windmill Strategy - passes pollIntervalMs as timeout to tx.wait and handle
     maxAttempts: 2
   });
 
+  // Wait until maxAttempts (2 calls to wait) finish
+  while (waitCount < 2) {
+    await new Promise((resolve) => setTimeout(resolve, 15));
+  }
+  // Allow remaining tick for cleanup
+  await new Promise((resolve) => setTimeout(resolve, 35));
+
   assert.equal(waitConfirms, 1, "Should pass 1 confirmation to tx.wait");
   assert.equal(waitTimeout, 25, "Should pass pollIntervalMs as wait timeout to tx.wait");
+  assert.equal(waitCount, 2, "Should attempt polling 2 times");
+
+  // Assert that TIMEOUT was handled cleanly and did not log transient error messages
+  const hasTransientErrorLog = debugLogs.some(
+    (msg) => typeof msg === "string" && msg.includes("Transient error polling receipt")
+  );
+  assert.equal(
+    hasTransientErrorLog,
+    false,
+    "TIMEOUT error should be handled cleanly without logging transient error debug messages"
+  );
 });
