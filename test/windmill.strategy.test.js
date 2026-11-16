@@ -303,3 +303,47 @@ test("Windmill Strategy - stops background settlement monitor cleanly when strat
   await strategy.getWorkItems({ now: 1000, provider, contract, logger });
   assert.equal(getOrderCalls.includes(301n), false, "Reservation must remain retained on shutdown");
 });
+
+test("Windmill Strategy - passes pollIntervalMs as timeout to tx.wait and handles timeout error cleanly", async () => {
+  const strategy = createWindmillStrategy();
+  const logger = createMockLogger();
+  let waitConfirms = null;
+  let waitTimeout = null;
+
+  const mockTx = {
+    hash: "0xtimeout123",
+    async wait(confirms, timeout) {
+      waitConfirms = confirms;
+      waitTimeout = timeout;
+      const err = new Error("wait for transaction timeout");
+      err.code = "TIMEOUT";
+      throw err;
+    }
+  };
+
+  const provider = {
+    async getBlockNumber() { return 100; },
+    async getTransactionReceipt() { return null; }
+  };
+
+  const contract = {
+    async paused() { return false; },
+    filters: { OrderCreated() { return "filter"; } },
+    async queryFilter() { return []; },
+    async getOrdersByPair() { return [401n]; },
+    async getOrder(id) { return { id, active: true, expiry: 0n }; },
+    async matchOrders() { return mockTx; }
+  };
+
+  await strategy.executeWorkItem({
+    item: { buy: { id: 401n }, sell: { id: 402n } },
+    contract,
+    logger,
+    provider,
+    pollIntervalMs: 25,
+    maxAttempts: 2
+  });
+
+  assert.equal(waitConfirms, 1, "Should pass 1 confirmation to tx.wait");
+  assert.equal(waitTimeout, 25, "Should pass pollIntervalMs as wait timeout to tx.wait");
+});

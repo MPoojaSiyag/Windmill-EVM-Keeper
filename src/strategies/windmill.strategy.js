@@ -77,11 +77,19 @@ async function waitForReceiptOrPoll({ tx, activeProvider, signal, pollIntervalMs
     });
 
     try {
+      const waitPromise = tx.wait(1, pollIntervalMs);
+      waitPromise?.catch?.(() => {});
+
       return await Promise.race([
-        tx.wait(),
+        waitPromise,
         timeoutPromise,
         abortPromise
       ]);
+    } catch (err) {
+      if (err?.code === "TIMEOUT" || err?.message?.toLowerCase().includes("timeout")) {
+        return null;
+      }
+      throw err;
     } finally {
       clearTimeout(timeoutId);
       if (signal && abortListener) {
