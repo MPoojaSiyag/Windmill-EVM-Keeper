@@ -23,11 +23,11 @@ export class RecoverableNonceManager extends ethers.NonceManager {
     const noncePromise = this.getNonce("pending");
     // Attach no-op handler immediately to prevent unhandled rejection if population fails first
     noncePromise.catch(() => {});
+    this.increment();
 
     let populatedTx;
     try {
       const nonce = await noncePromise;
-      this.increment();
       populatedTx = await this.signer.populateTransaction(tx);
       populatedTx.nonce = nonce;
     } catch (err) {

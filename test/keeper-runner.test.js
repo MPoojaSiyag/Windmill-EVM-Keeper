@@ -254,3 +254,40 @@ test("RecoverableNonceManager prevents unhandled rejection when both nonce looku
     process.removeListener("unhandledRejection", onUnhandled);
   }
 });
+
+test("RecoverableNonceManager reserves distinct nonces for concurrent sendTransaction dispatches", async () => {
+  let pendingCount = 100;
+  const dispatchedNonces = [];
+
+  const mockProvider = {
+    async getTransactionCount() { return pendingCount; }
+  };
+
+  const mockBaseSigner = {
+    address: "0x1234567890123456789012345678901234567890",
+    provider: mockProvider,
+    async getAddress() { return this.address; },
+    async getNonce() {
+      // Simulate slight async delay in nonce resolution
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      return pendingCount;
+    },
+    async populateTransaction(tx) { return { ...tx }; },
+    async sendTransaction(tx) {
+      dispatchedNonces.push(tx.nonce);
+      return { hash: `0x${tx.nonce}` };
+    }
+  };
+
+  const managedSigner = new RecoverableNonceManager(mockBaseSigner);
+
+  // Dispatch two transactions concurrently
+  await Promise.all([
+    managedSigner.sendTransaction({ to: "0x111" }),
+    managedSigner.sendTransaction({ to: "0x222" })
+  ]);
+
+  assert.equal(dispatchedNonces.length, 2);
+  assert.equal(dispatchedNonces[0], 100, "First transaction should receive nonce 100");
+  assert.equal(dispatchedNonces[1], 101, "Second concurrent transaction should receive reserved nonce 101");
+});
