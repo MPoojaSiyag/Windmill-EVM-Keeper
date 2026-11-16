@@ -190,3 +190,65 @@ test("Windmill Strategy - tracks pending settlements and skips them in getWorkIt
   await strategy.getWorkItems({ now: 1000, provider, contract, logger });
   assert.equal(getOrderCalls.includes(101n), true, "Order 101n should be fetched again after terminal settlement state");
 });
+
+test("Windmill Strategy - retains pending reservations on nonterminal receipt errors until terminal state", async () => {
+  const strategy = createWindmillStrategy();
+  const logger = createMockLogger();
+
+  let receiptFound = false;
+  const mockTx = {
+    hash: "0xhash789",
+    async wait() {
+      // Simulate nonterminal transient RPC error (without err.receipt)
+      throw new Error("RPC temporary timeout");
+    }
+  };
+
+  const provider = {
+    async getBlockNumber() { return 100; },
+    async getTransactionReceipt(hash) {
+      if (hash === "0xhash789" && receiptFound) {
+        return { status: 1, blockNumber: 101 };
+      }
+      return null;
+    }
+  };
+
+  const getOrderCalls = [];
+  const contract = {
+    async paused() { return false; },
+    filters: { OrderCreated() { return "filter"; } },
+    async queryFilter() { return []; },
+    async getOrdersByPair() { return [201n]; },
+    async getOrder(id) {
+      getOrderCalls.push(id);
+      return { id, active: true, expiry: 0n };
+    },
+    async matchOrders() {
+      return mockTx;
+    }
+  };
+
+  await strategy.executeWorkItem({
+    item: { buy: { id: 201n }, sell: { id: 202n } },
+    contract,
+    logger,
+    provider,
+    pollIntervalMs: 20,
+    maxAttempts: 5
+  });
+
+  // Next cycle immediately after nonterminal error:
+  // Reservation should NOT be dropped by a premature finally
+  await strategy.getWorkItems({ now: 1000, provider, contract, logger });
+  assert.equal(getOrderCalls.includes(201n), false, "Reservation must be retained after nonterminal error");
+
+  // Terminal receipt becomes available
+  receiptFound = true;
+  await new Promise((resolve) => setTimeout(resolve, 60));
+
+  // Order reservation should be cleared once terminal receipt is confirmed
+  getOrderCalls.length = 0;
+  await strategy.getWorkItems({ now: 1000, provider, contract, logger });
+  assert.equal(getOrderCalls.includes(201n), true, "Reservation should be cleared once terminal state is verified");
+});

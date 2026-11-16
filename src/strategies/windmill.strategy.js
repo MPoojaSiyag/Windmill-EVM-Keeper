@@ -34,6 +34,80 @@ function getPairKey(tokenA, tokenB) {
   return `${t0.toLowerCase()}-${t1.toLowerCase()}`;
 }
 
+/**
+ * Monitors a submitted transaction until a terminal state (mined or reverted)
+ * is verified, retaining reservations on transient/nonterminal RPC errors.
+ *
+ * @param {{
+ *   tx: any;
+ *   buyIdStr: string;
+ *   sellIdStr: string;
+ *   provider: any;
+ *   logger: any;
+ *   pendingOrderIds: Set<string>;
+ *   maxAttempts?: number;
+ *   pollIntervalMs?: number;
+ * }} params
+ */
+async function monitorPendingMatch({
+  tx,
+  buyIdStr,
+  sellIdStr,
+  provider,
+  logger,
+  pendingOrderIds,
+  maxAttempts = 10,
+  pollIntervalMs = 2000
+}) {
+  const activeProvider = provider ?? tx?.provider;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const receipt = typeof tx.wait === "function" ? await tx.wait() : null;
+      if (receipt) {
+        // Terminal state: transaction confirmed on-chain
+        break;
+      }
+    } catch (err) {
+      // In ethers, an on-chain transaction revert includes err.receipt (terminal state)
+      if (err?.receipt) {
+        logger.debug?.(
+          `Match tx ${tx?.hash} reverted on-chain at block ${err.receipt.blockNumber ?? "unknown"}`
+        );
+        break;
+      }
+
+      // Nonterminal error (e.g., transient RPC timeout / HTTP 502 / network disconnect)
+      logger.debug?.(
+        `Transient error polling receipt for tx ${tx?.hash} (attempt ${attempt}/${maxAttempts}): ${err?.message || err}`
+      );
+    }
+
+    // Fallback direct provider query if tx.wait() rejected on transient network error
+    if (activeProvider && tx?.hash) {
+      try {
+        const receipt = await activeProvider.getTransactionReceipt(tx.hash);
+        if (receipt) {
+          // Terminal state: verified receipt directly from provider
+          break;
+        }
+      } catch (pollErr) {
+        logger.debug?.(
+          `Transient error querying getTransactionReceipt for tx ${tx?.hash}: ${pollErr?.message || pollErr}`
+        );
+      }
+    }
+
+    if (attempt < maxAttempts) {
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+    }
+  }
+
+  // Clear reservations only after establishing terminal state (or giving up after max attempts)
+  pendingOrderIds.delete(buyIdStr);
+  pendingOrderIds.delete(sellIdStr);
+}
+
 export function createWindmillStrategy() {
   /** @type {number | null} */
   let lastScannedBlock = null;
@@ -213,9 +287,19 @@ export function createWindmillStrategy() {
      *   item: any;
      *   contract: any;
      *   logger: any;
+     *   provider?: any;
+     *   pollIntervalMs?: number;
+     *   maxAttempts?: number;
      * }} params
      */
-    async executeWorkItem({ item, contract, logger }) {
+    async executeWorkItem({
+      item,
+      contract,
+      logger,
+      provider,
+      pollIntervalMs = 2000,
+      maxAttempts = 10
+    }) {
       const deadline = Math.floor(Date.now() / 1000) + 60;
       const buyIdStr = item.buy.id.toString();
       const sellIdStr = item.sell.id.toString();
@@ -225,15 +309,21 @@ export function createWindmillStrategy() {
       pendingOrderIds.add(buyIdStr);
       pendingOrderIds.add(sellIdStr);
 
-      if (tx && typeof tx.wait === "function") {
-        tx.wait()
-          .catch((err) => {
-            logger.debug?.(`Match tx for buyId=${buyIdStr}, sellId=${sellIdStr} settled with error: ${err?.message || err}`);
-          })
-          .finally(() => {
-            pendingOrderIds.delete(buyIdStr);
-            pendingOrderIds.delete(sellIdStr);
-          });
+      if (tx && (typeof tx.wait === "function" || tx.hash)) {
+        monitorPendingMatch({
+          tx,
+          buyIdStr,
+          sellIdStr,
+          provider: provider ?? contract?.runner?.provider,
+          logger,
+          pendingOrderIds,
+          pollIntervalMs,
+          maxAttempts
+        }).catch((err) => {
+          logger.debug?.(`Unexpected error in monitorPendingMatch: ${err?.message || err}`);
+          pendingOrderIds.delete(buyIdStr);
+          pendingOrderIds.delete(sellIdStr);
+        });
       }
 
       return tx;
