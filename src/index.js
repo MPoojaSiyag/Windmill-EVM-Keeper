@@ -70,6 +70,13 @@ async function main() {
   const shutdown = (signal) => {
     runner.stop(signal);
     stopTelemetryServer(telemetryServer, logger);
+    if (typeof provider?.destroy === "function") {
+      try {
+        provider.destroy();
+      } catch (err) {
+        logger.debug?.("Error destroying provider during shutdown", err);
+      }
+    }
   };
   process.once("SIGINT", () => shutdown("SIGINT"));
   process.once("SIGTERM", () => shutdown("SIGTERM"));

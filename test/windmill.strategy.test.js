@@ -252,3 +252,54 @@ test("Windmill Strategy - retains pending reservations on nonterminal receipt er
   await strategy.getWorkItems({ now: 1000, provider, contract, logger });
   assert.equal(getOrderCalls.includes(201n), true, "Reservation should be cleared once terminal state is verified");
 });
+
+test("Windmill Strategy - stops background settlement monitor cleanly when strategy.stop() is called", async () => {
+  const strategy = createWindmillStrategy();
+  const logger = createMockLogger();
+
+  const mockTx = {
+    hash: "0xunmined",
+    wait() {
+      return new Promise(() => {}); // Unmined, never resolves
+    }
+  };
+
+  const provider = {
+    async getBlockNumber() { return 100; },
+    async getTransactionReceipt() { return null; }
+  };
+
+  const contract = {
+    async paused() { return false; },
+    filters: { OrderCreated() { return "filter"; } },
+    async queryFilter() { return []; },
+    async getOrdersByPair() { return [301n]; },
+    async getOrder(id) { return { id, active: true, expiry: 0n }; },
+    async matchOrders() { return mockTx; }
+  };
+
+  await strategy.executeWorkItem({
+    item: { buy: { id: 301n }, sell: { id: 302n } },
+    contract,
+    logger,
+    provider,
+    pollIntervalMs: 50,
+    maxAttempts: 100
+  });
+
+  // Call strategy.stop() to simulate shutdown
+  strategy.stop();
+
+  // Give short tick to ensure loop terminates cleanly
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  // Verify reservation is retained during shutdown
+  const getOrderCalls = [];
+  contract.getOrder = async (id) => {
+    getOrderCalls.push(id);
+    return { id, active: true, expiry: 0n };
+  };
+
+  await strategy.getWorkItems({ now: 1000, provider, contract, logger });
+  assert.equal(getOrderCalls.includes(301n), false, "Reservation must remain retained on shutdown");
+});

@@ -35,8 +35,68 @@ function getPairKey(tokenA, tokenB) {
 }
 
 /**
+ * Waits for transaction receipt with bounded timeout and abort signal
+ * to prevent hanging listeners or blocking shutdown.
+ *
+ * @param {{
+ *   tx: any;
+ *   activeProvider: any;
+ *   signal?: AbortSignal;
+ *   pollIntervalMs: number;
+ * }} params
+ */
+async function waitForReceiptOrPoll({ tx, activeProvider, signal, pollIntervalMs }) {
+  if (signal?.aborted) return null;
+
+  // Direct check first via getTransactionReceipt (does not retain persistent event listeners)
+  if (activeProvider && tx?.hash) {
+    try {
+      const receipt = await activeProvider.getTransactionReceipt(tx.hash);
+      if (receipt) return receipt;
+    } catch {
+      // ignore transient error
+    }
+  }
+
+  // If tx.wait is available, bound it by pollIntervalMs and abort signal
+  if (typeof tx.wait === "function") {
+    let timeoutId;
+    let abortListener;
+
+    const timeoutPromise = new Promise((resolve) => {
+      timeoutId = setTimeout(() => resolve(null), pollIntervalMs);
+    });
+
+    const abortPromise = new Promise((resolve) => {
+      if (signal?.aborted) {
+        resolve(null);
+        return;
+      }
+      abortListener = () => resolve(null);
+      signal?.addEventListener("abort", abortListener, { once: true });
+    });
+
+    try {
+      return await Promise.race([
+        tx.wait(),
+        timeoutPromise,
+        abortPromise
+      ]);
+    } finally {
+      clearTimeout(timeoutId);
+      if (signal && abortListener) {
+        signal.removeEventListener("abort", abortListener);
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
  * Monitors a submitted transaction until a terminal state (mined or reverted)
- * is verified, retaining reservations on transient/nonterminal RPC errors.
+ * is verified, retaining reservations on transient/nonterminal RPC errors
+ * and supporting clean cancellation during shutdown.
  *
  * @param {{
  *   tx: any;
@@ -45,6 +105,7 @@ function getPairKey(tokenA, tokenB) {
  *   provider: any;
  *   logger: any;
  *   pendingOrderIds: Set<string>;
+ *   signal?: AbortSignal;
  *   maxAttempts?: number;
  *   pollIntervalMs?: number;
  * }} params
@@ -56,24 +117,39 @@ async function monitorPendingMatch({
   provider,
   logger,
   pendingOrderIds,
-  maxAttempts = 10,
+  signal,
+  maxAttempts = 15,
   pollIntervalMs = 2000
 }) {
   const activeProvider = provider ?? tx?.provider;
+  let settled = false;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    if (signal?.aborted) {
+      return;
+    }
+
     try {
-      const receipt = typeof tx.wait === "function" ? await tx.wait() : null;
+      const receipt = await waitForReceiptOrPoll({
+        tx,
+        activeProvider,
+        signal,
+        pollIntervalMs
+      });
       if (receipt) {
-        // Terminal state: transaction confirmed on-chain
+        settled = true;
         break;
       }
     } catch (err) {
+      if (signal?.aborted) {
+        return;
+      }
       // In ethers, an on-chain transaction revert includes err.receipt (terminal state)
       if (err?.receipt) {
         logger.debug?.(
           `Match tx ${tx?.hash} reverted on-chain at block ${err.receipt.blockNumber ?? "unknown"}`
         );
+        settled = true;
         break;
       }
 
@@ -83,29 +159,30 @@ async function monitorPendingMatch({
       );
     }
 
-    // Fallback direct provider query if tx.wait() rejected on transient network error
-    if (activeProvider && tx?.hash) {
-      try {
-        const receipt = await activeProvider.getTransactionReceipt(tx.hash);
-        if (receipt) {
-          // Terminal state: verified receipt directly from provider
-          break;
-        }
-      } catch (pollErr) {
-        logger.debug?.(
-          `Transient error querying getTransactionReceipt for tx ${tx?.hash}: ${pollErr?.message || pollErr}`
-        );
+    if (attempt < maxAttempts && !settled) {
+      if (signal?.aborted) {
+        return;
       }
-    }
-
-    if (attempt < maxAttempts) {
-      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+      await new Promise((resolve) => {
+        let timeoutId;
+        const onAbort = () => {
+          clearTimeout(timeoutId);
+          resolve();
+        };
+        timeoutId = setTimeout(() => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve();
+        }, pollIntervalMs);
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
     }
   }
 
-  // Clear reservations only after establishing terminal state (or giving up after max attempts)
-  pendingOrderIds.delete(buyIdStr);
-  pendingOrderIds.delete(sellIdStr);
+  // Clear reservations only after establishing terminal state (or giving up after max attempts when not shutting down)
+  if (settled || !signal?.aborted) {
+    pendingOrderIds.delete(buyIdStr);
+    pendingOrderIds.delete(sellIdStr);
+  }
 }
 
 export function createWindmillStrategy() {
@@ -113,12 +190,17 @@ export function createWindmillStrategy() {
   let lastScannedBlock = null;
   /** @type {Set<string>} */
   const pendingOrderIds = new Set();
+  const abortController = new AbortController();
 
   return {
     name: "windmill",
     requiresSigner: true,
     requiresContract: true,
     abi: WINDMILL_EXCHANGE_ABI,
+
+    stop() {
+      abortController.abort();
+    },
 
     /**
      * @param {{
@@ -317,6 +399,7 @@ export function createWindmillStrategy() {
           provider: provider ?? contract?.runner?.provider,
           logger,
           pendingOrderIds,
+          signal: abortController.signal,
           pollIntervalMs,
           maxAttempts
         }).catch((err) => {
